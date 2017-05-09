@@ -42,6 +42,7 @@ func NewSimpleCLIClient(d dialer.Dialer) (CLIClient, error) {
 	c.addCmd(&getStatusCmd{})
 	c.addCmd(&smokeTestCmd{})
 	c.addCmd(&watchJobCmd{})
+	c.addCmd(&killJobCmd{})
 
 	return c, nil
 }

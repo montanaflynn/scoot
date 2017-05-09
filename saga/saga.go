@@ -91,6 +91,19 @@ func (s *Saga) EndSaga() error {
 // Returns an error if it fails
 //
 func (s *Saga) AbortSaga() error {
+	//TODO differentiate between kill and abort when add task compensation logic
+	return s.updateSagaState(MakeAbortSagaMessage(s.id))
+}
+
+//
+// Log an KillSaga message.  This indicates that the
+// Saga has been killed by a client request no
+// compensating transactions should be applied.
+//
+// Returns an error if it fails
+//
+func (s *Saga) KillSaga() error {
+	//TODO differentiate between kill and abort
 	return s.updateSagaState(MakeAbortSagaMessage(s.id))
 }
 

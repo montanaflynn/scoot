@@ -98,6 +98,30 @@ func (c *CloudScootClient) GetStatus(jobId string) (r *scoot.JobStatus, err erro
 	return jobStatus, err
 }
 
+// GetStatus API. Returns the JobStatus of the specified JobId if successful,
+// otherwise an erorr.
+func (c *CloudScootClient) KillJob(jobId string) (r *scoot.JobStatus, err error) {
+	if c.client == nil {
+		c.client, err = createClient(c.addr, c.dialer)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	jobStatus, err := c.client.KillJob(jobId)
+
+	// if an error occurred reset the connection, could be a broken pipe or other
+	// unrecoverable error.  reset connection so a new clean one gets created
+	// on the next request
+	if err != nil {
+		// this could cause an error when closing transport
+		// but we don't care do our best effort and move on
+		c.closeConnection()
+	}
+
+	return jobStatus, err
+}
+
 // Close any open Transport associated with this ScootClient
 func (c *CloudScootClient) Close() error {
 	if c.client != nil {

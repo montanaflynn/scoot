@@ -192,6 +192,7 @@ func Test_StatefulScheduler_TaskGetsMarkedCompletedAfterMaxRetriesFailedStarts(t
 	}
 }
 
+
 // verifies that task gets retried maxRetryTimes and then marked as completed
 func Test_StatefulScheduler_TaskGetsMarkedCompletedAfterMaxRetriesFailedRuns(t *testing.T) {
 	jobDef := sched.GenJobDef(1)
@@ -306,4 +307,93 @@ func Test_StatefulScheduler_JobRunsToCompletion(t *testing.T) {
 	for len(s.inProgressJobs) > 0 {
 		s.step()
 	}
+}
+
+func Test_StatefulScheduler_KillPendingJob(t *testing.T) {
+
+	s, jobId, _ := putJobInScheduler(1, t)
+
+	jobStatus, _ := s.KillJob(jobId)
+
+	verifyJobStatus(jobStatus, sched.Completed, []sched.Status{sched.Killed}, t)
+}
+
+
+func Test_StatefulScheduler_KillStartedJob(t *testing.T) {
+
+	s, jobId, _ := putJobInScheduler(1, t)
+
+	s.step()  // starts the first task
+
+	jobStatus, err := s.KillJob(jobId)
+
+	if err != nil {
+		t.Errorf("Expected err to be nil, instead is %v", err.Error())
+	}
+
+	verifyJobStatus(jobStatus, sched.Completed, []sched.Status{sched.Killed}, t)
+}
+
+
+func Test_StatefulScheduler_KillFinishedJob(t *testing.T) {
+	s, jobId, _ := putJobInScheduler(1, t)
+
+	// should start the task
+	s.step()
+	s.step()
+
+	jobStatus, err := s.KillJob(jobId)
+
+	if err != nil {
+		t.Errorf("Expected err to be nil, instead is %v", err.Error())
+	}
+
+	verifyJobStatus(jobStatus, sched.Completed, []sched.Status{sched.Completed}, t)
+
+}
+
+
+func putJobInScheduler(numTasks int, t *testing.T) (*statefulScheduler, string, error){
+	// create the job and run it to completion
+	jobDef := sched.GenJobDef(numTasks)
+
+	deps := getDefaultSchedDeps()
+	// cluster with one node
+	cl := makeTestCluster("node1")
+	deps.initialCl = cl.nodes
+	deps.clUpdates = cl.ch
+
+	// sagalog mock to ensure all messages are logged appropriately
+	mockCtrl := gomock.NewController(t)
+	defer mockCtrl.Finish()
+	sagaLogMock := saga.NewMockSagaLog(mockCtrl)
+	sagaLogMock.EXPECT().StartSaga(gomock.Any(), gomock.Any())
+
+	deps.sc = saga.MakeSagaCoordinator(sagaLogMock)
+
+	s := makeStatefulSchedulerDeps(deps)
+
+	// put the job on the jobs channel
+	jobId, err := s.ScheduleJob(jobDef)
+
+	// force the first job to pending state without starting it
+	s.addJobs()
+
+	return s, jobId, err
+
+}
+
+func verifyJobStatus(jobStatus *jobState, expectedJobStatus sched.Status, expectedTaskStatus[] sched.Status, t *testing.T) {
+	if jobStatus.getJobStatus() != expectedJobStatus {
+		t.Errorf("Expected job status to be %s, got %s", expectedJobStatus, jobStatus.getJobStatus().String())
+	}
+
+	i := 0
+	for _, task := range jobStatus.Tasks {
+		if task.Status != expectedTaskStatus[i] {
+			t.Errorf("Expected task %d status to be %s, got %s",i, expectedTaskStatus[i], task.TaskId, task.Status.String())
+		}
+		i++
+	}
+
 }

@@ -31,8 +31,9 @@ type taskRunner struct {
 	runnerRetryInterval   time.Duration // How long to sleep between runner req retries.
 	runnerOverhead        time.Duration // Runner will timeout after the caller-provided timeout plus this overhead.
 
-	jobId  string
-	taskId string
+	jobId  string			    // the job id assigned by the scheduler
+	taskId string			    // the task id assigned by the scheduler
+	runId  runner.RunID			    // the run id from the runner
 	task   sched.TaskDefinition
 	nodeId cluster.NodeId
 }
@@ -54,19 +55,31 @@ func (t *taskError) Error() string {
 // are logged and the task completes
 // parameters:
 func (r *taskRunner) run() error {
+	fmt.Println("************** running task")
 	log.Infof("Starting task - job: %s, task: %s, node: %s -> %v", r.jobId, r.taskId, r.nodeId, r.task)
+	fmt.Println("************** running task1")
 	taskErr := &taskError{}
+	fmt.Println("************** running task2")
 
 	// Log StartTask Message to SagaLog
+	fmt.Println("************** logging startTask")
 	if err := r.logTaskStatus(nil, saga.StartTask); err != nil {
+		fmt.Println("************ hit err")
 		taskErr.sagaErr = err
 		return taskErr
 	}
 
 	// Run and update taskErr with the results.
+	fmt.Println("*************** before runAndWait")
 	st, err := r.runAndWait(r.taskId, r.task)
 	taskErr.runnerErr = err
 	taskErr.st = st
+
+
+	// NOTE: the following is needed to be able to kill a task.
+	// This only works because r is a pointer and r's runner is the
+	// queueing runner which returns the run id without waiting for the run to complete
+	r.runId = st.RunID
 
 	// We got a good message back, but it indicates an error. Update taskErr accordingly.
 	if err == nil && st.State != runner.COMPLETE {
@@ -148,6 +161,7 @@ func (r *taskRunner) runAndWait(taskId string, task sched.TaskDefinition) (runne
 	elapsedRetryDuration = 0
 	includeRunning := true
 	for {
+		// query the status
 		st, err = r.queryWithTimeout(id, cmdEndTime, includeRunning)
 		elapsed := elapsedRetryDuration + r.runnerRetryInterval
 		if (err != nil && elapsed >= r.runnerRetryTimeout) || st.State.IsDone() {
@@ -217,4 +231,20 @@ func (r *taskRunner) logTaskStatus(st *runner.RunStatus, msgType saga.SagaMessag
 	}
 
 	return err
+}
+
+
+/**
+send an async Abort request to the remote runner.  Construct a RunStatus
+indicating that the run was aborted
+ */
+func (r *taskRunner) Abort() (runner.RunStatus, error) {
+	//TODO - use async Runner to get error?
+	go func(runId runner.RunID) {
+		r.runner.Abort(runId)
+	}(r.runId)
+
+	return runner.RunStatus{RunID:r.runId,
+		State: runner.ABORTED,
+		LogTags: runner.LogTags{JobID: r.jobId, TaskID: r.taskId}}, nil
 }

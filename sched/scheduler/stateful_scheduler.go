@@ -15,6 +15,8 @@ import (
 	"github.com/scootdev/scoot/runner"
 	"github.com/scootdev/scoot/saga"
 	"github.com/scootdev/scoot/sched"
+	"sync"
+	"reflect"
 )
 
 // Scheduler Config variables read at initialization
@@ -80,6 +82,11 @@ type statefulScheduler struct {
 	// stats
 	stat stats.StatsReceiver
 }
+
+// syncrhonize job add and job kill management of inProgressJob entries and
+// starting tasks
+var killJobLock sync.Mutex
+
 
 // Create a New StatefulScheduler that implements the Scheduler interface
 // cluster.Cluster - cluster of worker nodes
@@ -259,7 +266,8 @@ func (s *statefulScheduler) step() {
 func (s *statefulScheduler) addJobs() {
 	select {
 	case newJobMsg := <-s.addJobCh:
-		s.inProgressJobs[newJobMsg.job.Id] = newJobState(newJobMsg.job, newJobMsg.saga)
+		njs := newJobState(newJobMsg.job, newJobMsg.saga)
+		s.lockingAddToInprogress(newJobMsg.job.Id, njs)
 
 		var total, completed, running int
 		for _, job := range s.inProgressJobs {
@@ -271,6 +279,14 @@ func (s *statefulScheduler) addJobs() {
 			newJobMsg.job.Id, len(newJobMsg.job.Def.Tasks), total-completed-running, running, completed, total)
 	default:
 	}
+}
+
+// this function isolates the lock to just the map assignment
+func (s *statefulScheduler)lockingAddToInprogress(id string, js *jobState) {
+	killJobLock.Lock()
+	defer killJobLock.Unlock()
+	s.inProgressJobs[id] = js
+
 }
 
 // checks if any of the in progress jobs are completed.  If a job is
@@ -305,6 +321,28 @@ func (s *statefulScheduler) checkForCompletedJobs() {
 						log.Infof("Job completed but failed to log: %v", j.Job.Id)
 					}
 				})
+		} else if jobState.getJobStatus() == sched.Killed && !jobState.EndingSaga {
+			// mark job as being completed
+			jobState.EndingSaga = true
+
+			// set up variables for async functions for async function & callbacks
+			j := jobState
+
+			s.asyncRunner.RunAsync(
+				func() error {
+					return j.Saga.AbortSaga()
+				},
+				func(err error) {
+					if err == nil {
+						log.Infof("Job completed and logged: %v", j.Job.Id)
+						// This job is fully processed remove from
+						// InProgressJobs
+						delete(s.inProgressJobs, j.Job.Id)
+					} else {
+						//TODO - this should be error level(?)
+						log.Infof("Job completed but failed to log: %v", j.Job.Id)
+					}
+				})
 		}
 	}
 }
@@ -314,7 +352,12 @@ func (s *statefulScheduler) scheduleTasks() {
 	// Get a list of all available tasks to be ran
 	var unscheduledTasks []*taskState
 	for _, jobState := range s.inProgressJobs {
-		unscheduledTasks = append(unscheduledTasks, jobState.getUnScheduledTasks()...)
+		unscheduledJobTasks := jobState.getUnScheduledTasks()
+		killJobLock.Lock()  // add the unscheduled tasks iff the job has not been killed
+		if (jobState.getJobStatus() != sched.Killed) {
+			unscheduledTasks = append(unscheduledTasks, unscheduledJobTasks...)
+		}
+		killJobLock.Unlock()
 	}
 	if len(unscheduledTasks) == 0 {
 		return
@@ -335,11 +378,6 @@ func (s *statefulScheduler) scheduleTasks() {
 
 		preventRetries := bool(ta.task.NumTimesTried >= s.maxRetriesPerTask)
 
-		// Mark Task as Started
-		s.clusterState.taskScheduled(nodeId, taskId, taskDef.SnapshotID)
-		log.Infof("job:%s, task:%s, scheduled on node:%s\n", jobId, taskId, nodeId)
-		jobState.taskStarted(taskId)
-
 		run := &taskRunner{
 			saga:   sa,
 			runner: s.runnerFactory(ta.node),
@@ -357,58 +395,139 @@ func (s *statefulScheduler) scheduleTasks() {
 			nodeId: nodeId,
 		}
 
-		s.asyncRunner.RunAsync(
-			run.run,
-			func(err error) {
-				flaky := false
-				if err != nil {
-					// Get the type of error. Currently we only care to distinguish runner (ex: thrift) errors to mark flaky nodes.
-					taskErr := err.(*taskError)
-					flaky = (taskErr.runnerErr != nil)
+		// start the task locking out kill actions till it is started
+		s.lockingTaskStart(jobId, taskId, nodeId, taskDef,run,jobState, preventRetries)
+	}
+}
 
-					msg := "Error running job (will be retried):"
-					if taskErr.resultErr != nil && taskErr.st.State == runner.COMPLETE {
-						msg = "Error running job (quitting, tasks that run to completion are not retried):"
-						err = nil
-					} else if preventRetries {
-						msg = fmt.Sprintf("Error running job (quitting, hit max retries of %d):", s.maxRetriesPerTask)
-						err = nil
-					} else {
-						jobState.errorRunningTask(taskId, err)
-					}
-					log.Info(msg, jobId, ", task:", taskId, " err:", taskErr, " cmd:", taskDef.Argv)
+// perform a last minute check for the task's job having been killed
+// If the job is not killed, start the task (locking out other kill actions)
+// otherwise, end the task
+func (s *statefulScheduler) lockingTaskStart(jobId string, taskId string, nodeId cluster.NodeId,
+	taskDef sched.TaskDefinition,
+	taskRunner *taskRunner,
+	jobState *jobState,
+	preventRetries bool) {
 
-					// If the task completed succesfully but sagalog failed, start a goroutine to retry until it succeeds.
-					if taskErr.sagaErr != nil && taskErr.runnerErr == nil && taskErr.resultErr == nil {
-						log.Info(msg, jobId, ", task:", taskId, " -> starting goroutine to handle failed saga.EndTask. ")
-						go func() {
-							for err := errors.New(""); err != nil; err = run.logTaskStatus(&taskErr.st, saga.EndTask) {
-								time.Sleep(time.Second)
-							}
-							log.Info(msg, jobId, ", task:", taskId, " -> finished goroutine to handle failed saga.EndTask. ")
-						}()
-					}
+	// lock out other kill events till we are done with this task
+	killJobLock.Lock()
+	defer killJobLock.Unlock()
+
+
+	// was the task's job killed while we were assigning tasks and/or starting
+	// other tasks?
+	// if so release the node, mark the task as killed and return
+	if s.inProgressJobs[jobId].getJobStatus() == sched.Killed {
+		s.clusterState.taskCompleted(nodeId, taskId, false)
+		jobState.taskKilled(taskId)
+		return
+	}
+
+	// start the task:
+	// Mark Task as Started in the cluster
+	s.clusterState.taskScheduled(nodeId, taskId, taskDef.SnapshotID)
+	log.Infof("job:%s, task:%s, scheduled on node:%s\n", jobId, taskId, nodeId)
+
+	// mark the task as started in the jobState and record its taskRunner
+	jobState.taskStarted(taskId, taskRunner)
+
+	fmt.Println("********************* running task async with ", reflect.TypeOf(taskRunner))
+	s.asyncRunner.RunAsync(
+		taskRunner.run,
+		func(err error) {
+			flaky := false
+			if err != nil {
+				// Get the type of error. Currently we only care to distinguish runner (ex: thrift) errors to mark flaky nodes.
+				taskErr := err.(*taskError)
+				flaky = (taskErr.runnerErr != nil)
+
+				msg := "Error running job (will be retried):"
+				if taskErr.resultErr != nil && taskErr.st.State == runner.COMPLETE {
+					msg = "Error running job (quitting, tasks that run to completion are not retried):"
+					err = nil
+				} else if preventRetries {
+					msg = fmt.Sprintf("Error running job (quitting, hit max retries of %d):", s.maxRetriesPerTask)
+					err = nil
+				} else {
+					jobState.errorRunningTask(taskId, err)
 				}
-				if err == nil {
-					log.Info("Ending job:", jobId, ", task:", taskId, " command:", strings.Join(taskDef.Argv, " "))
-					jobState.taskCompleted(taskId)
-				}
+				log.Info(msg, jobId, ", task:", taskId, " err:", taskErr, " cmd:", taskDef.Argv)
 
-				// update cluster state that this node is now free and if we consider the runner to be flaky.
-				log.Info("Freeing node:", nodeId, ", removed job:", jobId, ", task:", taskId)
-				s.clusterState.taskCompleted(nodeId, taskId, flaky)
-
-				total := 0
-				completed := 0
-				running := 0
-				for _, job := range s.inProgressJobs {
-					total += len(job.Tasks)
-					completed += job.TasksCompleted
-					running += job.TasksRunning
+				// If the task completed succesfully but sagalog failed, start a goroutine to retry until it succeeds.
+				if taskErr.sagaErr != nil && taskErr.runnerErr == nil && taskErr.resultErr == nil {
+					log.Info(msg, jobId, ", task:", taskId, " -> starting goroutine to handle failed saga.EndTask. ")
+					go func() {
+						for err := errors.New(""); err != nil; err = taskRunner.logTaskStatus(&taskErr.st, saga.EndTask) {
+							time.Sleep(time.Second)
+						}
+						log.Info(msg, jobId, ", task:", taskId, " -> finished goroutine to handle failed saga.EndTask. ")
+					}()
 				}
-				log.Info("Job:", jobState.Job.Id, " #running:", jobState.TasksRunning, " #completed:", jobState.TasksCompleted,
-					" #total:", len(jobState.Tasks), " isdone:", (jobState.TasksCompleted == len(jobState.Tasks)))
-				log.Info("Jobs summary -> running:", running, " completed:", completed, " total:", total, " alldone:", (completed == total))
-			})
+			}
+			if err == nil {
+				log.Info("Ending job:", jobId, ", task:", taskId, " command:", strings.Join(taskDef.Argv, " "))
+				jobState.taskCompleted(taskId)
+			}
+
+			// update cluster state that this node is now free and if we consider the runner to be flaky.
+			log.Info("Freeing node:", nodeId, ", removed job:", jobId, ", task:", taskId)
+			s.clusterState.taskCompleted(nodeId, taskId, flaky)
+
+			total := 0
+			completed := 0
+			running := 0
+			for _, job := range s.inProgressJobs {
+				total += len(job.Tasks)
+				completed += job.TasksCompleted
+				running += job.TasksRunning
+			}
+			log.Info("Job:", jobState.Job.Id, " #running:", jobState.TasksRunning, " #completed:", jobState.TasksCompleted,
+				" #total:", len(jobState.Tasks), " isdone:", (jobState.TasksCompleted == len(jobState.Tasks)))
+			log.Info("Jobs summary -> running:", running, " completed:", completed, " total:", total, " alldone:", (completed == total))
+		})
+
+}
+
+/**
+If the job is pending or in progress kill it.
+
+If a saga log can be found for the job, return the saga log status.
+Otherwise return a message to validate the job id or try again in a few moments.
+
+TODO: the job may still be in the addJobChannel - discuss what to do:
+option1: return a message telling the client to check the job id and try again in a few moments
+option2: wait up to a timeout period for the job to come off the addJobChannel, but still have
+to tell client to try again if the timeout period expires.
+ */
+func (s *statefulScheduler) KillJob(jobId string) (*jobState, error) {
+
+	killJobLock.Lock()
+	jobState, ok := s.inProgressJobs[jobId]
+	killJobLock.Unlock()
+	if ok {
+		// the job is in the map
+		if jobState.getJobStatus() == sched.InProgress {
+			for _, task := range jobState.Tasks {
+				killJobLock.Lock()
+				if task.Status == sched.InProgress {
+					task.TaskRunner.Abort()
+					jobState.taskKilled(task.TaskId)
+				} else if task.Status == sched.NotStarted {
+					jobState.taskKilled(task.TaskId)
+				}
+				killJobLock.Unlock()
+
+			}
+			return jobState, nil
+		}
+		return jobState, errors.New("Killing job other than in progress not implemented yet.")
+	} else {
+		/**
+		if the job is not found
+			look for the job in the saga
+		if the job is in the saga return completed
+		otherwise return "job not found, check the job id or try again in a few moments."
+		 */
+		return nil, errors.New("Killing job not in inProgress map not implemented yet.")
 	}
 }

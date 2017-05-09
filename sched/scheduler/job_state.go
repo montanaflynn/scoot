@@ -26,6 +26,7 @@ type taskState struct {
 	Status        sched.Status
 	TimeStarted   time.Time
 	NumTimesTried int
+	TaskRunner    *taskRunner
 }
 
 // Creates a New Job State based on the specified Job and Saga
@@ -81,12 +82,23 @@ func (j *jobState) getUnScheduledTasks() []*taskState {
 }
 
 // Update JobState to reflect that a Task has been started
-func (j *jobState) taskStarted(taskId string) {
+func (j *jobState) taskStarted(taskId string, tr *taskRunner) {
 	taskState := j.Tasks[taskId]
 	taskState.Status = sched.InProgress
 	taskState.TimeStarted = time.Now()
+	taskState.TaskRunner = tr
 	taskState.NumTimesTried++
 	j.TasksRunning++
+}
+
+// Update JobState to reflect that a Task has been killed due to the job being killed
+func (j *jobState) taskKilled(taskId string) {
+	taskState := j.Tasks[taskId]
+	taskState.Status = sched.Killed
+	taskState.TimeStarted = nilTime
+	taskState.TaskRunner = nil
+	j.TasksCompleted++
+	j.TasksRunning--
 }
 
 // Update JobState to reflect that a Task has been completed
@@ -94,6 +106,7 @@ func (j *jobState) taskCompleted(taskId string) {
 	taskState := j.Tasks[taskId]
 	taskState.Status = sched.Completed
 	taskState.TimeStarted = nilTime
+	taskState.TaskRunner = nil
 	j.TasksCompleted++
 	j.TasksRunning--
 }
@@ -103,6 +116,7 @@ func (j *jobState) errorRunningTask(taskId string, err error) {
 	taskState := j.Tasks[taskId]
 	taskState.Status = sched.NotStarted
 	taskState.TimeStarted = nilTime
+	taskState.TaskRunner = nil
 	j.TasksRunning--
 }
 
