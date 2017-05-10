@@ -313,42 +313,57 @@ func Test_StatefulScheduler_KillPendingJob(t *testing.T) {
 
 	s, jobId, _ := putJobInScheduler(1, t)
 
-	jobStatus, _ := s.KillJob(jobId)
+	err := s.KillJob(jobId)
+	s.step()  // process the kill job request
+	if err != nil {
+		t.Errorf("Expected error to be nil, got:%s",err.Error())
+	}
 
-	verifyJobStatus(jobStatus, sched.Completed, []sched.Status{sched.Killed}, t)
+	verifyJobStatus("verify kill", jobId, sched.Completed, []sched.Status{sched.Killed}, s, t)
 }
 
 
 func Test_StatefulScheduler_KillStartedJob(t *testing.T) {
 
 	s, jobId, _ := putJobInScheduler(1, t)
-
 	s.step()  // starts the first task
 
-	jobStatus, err := s.KillJob(jobId)
+	err := s.KillJob(jobId)
+	s.step()  // process the kill job request
 
 	if err != nil {
 		t.Errorf("Expected err to be nil, instead is %v", err.Error())
 	}
 
-	verifyJobStatus(jobStatus, sched.Completed, []sched.Status{sched.Killed}, t)
+	verifyJobStatus("verify kill", jobId, sched.Completed, []sched.Status{sched.Killed}, s, t)
 }
 
 
 func Test_StatefulScheduler_KillFinishedJob(t *testing.T) {
 	s, jobId, _ := putJobInScheduler(1, t)
+	s.step()  // start the job
+	for s.inProgressJobs[jobId].getJobStatus() != sched.Completed {
+		jobStatus := s.inProgressJobs[jobId]
+		log.Infof("job status: %s", jobStatus.getJobStatus().String())
 
-	// should start the task
-	s.step()
-	s.step()
+		i := 0
+		for _, task := range jobStatus.Tasks {
+			log.Infof("task %d status: %s", i, task.Status.String())
+			i++
+		}
+		time.Sleep(time.Second * 1 )
+	}
+	s.step()  // recognize the job as done
+	verifyJobStatus("verify completed", jobId, sched.Completed, []sched.Status{sched.Completed}, s, t)
 
-	jobStatus, err := s.KillJob(jobId)
+	err := s.KillJob(jobId)
+	s.step()  // process the kill job request
 
 	if err != nil {
 		t.Errorf("Expected err to be nil, instead is %v", err.Error())
 	}
 
-	verifyJobStatus(jobStatus, sched.Completed, []sched.Status{sched.Completed}, t)
+	verifyJobStatus("verify kill", jobId, sched.Completed, []sched.Status{sched.Completed}, s, t)
 
 }
 
@@ -363,14 +378,7 @@ func putJobInScheduler(numTasks int, t *testing.T) (*statefulScheduler, string, 
 	deps.initialCl = cl.nodes
 	deps.clUpdates = cl.ch
 
-	// sagalog mock to ensure all messages are logged appropriately
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-	sagaLogMock := saga.NewMockSagaLog(mockCtrl)
-	sagaLogMock.EXPECT().StartSaga(gomock.Any(), gomock.Any())
-
-	deps.sc = saga.MakeSagaCoordinator(sagaLogMock)
-
+	deps.sc = sagalogs.MakeInMemorySagaCoordinator()
 	s := makeStatefulSchedulerDeps(deps)
 
 	// put the job on the jobs channel
@@ -383,15 +391,19 @@ func putJobInScheduler(numTasks int, t *testing.T) (*statefulScheduler, string, 
 
 }
 
-func verifyJobStatus(jobStatus *jobState, expectedJobStatus sched.Status, expectedTaskStatus[] sched.Status, t *testing.T) {
+func verifyJobStatus(tag string, jobId string, expectedJobStatus sched.Status, expectedTaskStatus[] sched.Status,
+	s *statefulScheduler, t *testing.T) {
+
+	jobStatus := s.inProgressJobs[jobId]
+
 	if jobStatus.getJobStatus() != expectedJobStatus {
-		t.Errorf("Expected job status to be %s, got %s", expectedJobStatus, jobStatus.getJobStatus().String())
+		t.Errorf("%s: Expected job status to be %s, got %s", tag, expectedJobStatus, jobStatus.getJobStatus().String())
 	}
 
 	i := 0
 	for _, task := range jobStatus.Tasks {
 		if task.Status != expectedTaskStatus[i] {
-			t.Errorf("Expected task %d status to be %s, got %s",i, expectedTaskStatus[i], task.TaskId, task.Status.String())
+			t.Errorf("%s: Expected task %d status to be %s, got %s", tag, i, expectedTaskStatus[i], task.Status.String())
 		}
 		i++
 	}

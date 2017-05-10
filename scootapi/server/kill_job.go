@@ -16,7 +16,7 @@ killed or one of the following errors
 func KillJob(jobId string, scheduler scheduler.Scheduler, sc saga.SagaCoordinator) (*scoot.JobStatus, error) {
 
 	fmt.Println("in KillJob")
-	_, err := scheduler.KillJob(jobId)
+	err := scheduler.KillJob(jobId)
 	if err != nil {
 		fmt.Println("returning error")
 		return nil, err
