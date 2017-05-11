@@ -113,7 +113,8 @@ func TestMemCap(t *testing.T) {
 	if prevUsage < 5*1024*1024 {
 		t.Fatalf("Expected usage to be at least 5MB, was: %dB", prevUsage)
 	}
-	time.Sleep(500 * time.Millisecond)
+	// allow time for bounded execer to kill process
+	time.Sleep(1000 * time.Millisecond)
 	usage, err := e.memUsage(process.(*osProcess).cmd.Process.Pid)
 	if err != nil {
 		t.Fatalf("Error finding memUsage, %v", err)
