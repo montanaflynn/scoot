@@ -7,7 +7,6 @@ import (
 	"math"
 	"os"
 	"os/exec"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -167,13 +166,6 @@ func (e *osExecer) monitorMem(p *osProcess) {
 // In MacOSX, all session ids are shown as 0 by the ps command, so we use pgid to determine memory usage.
 // Other architectures are yet to be investigated
 func (e *osExecer) memUsage(pid int) (execer.Memory, error) {
-	var id string
-	switch runtime.GOOS {
-	case "darwin":
-		id = "pgid"
-	default:
-		id = "sess"
-	}
 	str := `
 PID=%d
 PSLIST=$(ps -e -o pid= -o %s= -o rss= | tr '\n' ';' | sed 's,;$,,')
@@ -195,7 +187,7 @@ print total
 
 " | python
 `
-	cmd := exec.Command("bash", "-c", fmt.Sprintf(str, pid, id))
+	cmd := exec.Command("bash", "-c", fmt.Sprintf(str, pid, "pgid"))
 	if usageKB, err := cmd.Output(); err != nil {
 		return 0, err
 	} else {
