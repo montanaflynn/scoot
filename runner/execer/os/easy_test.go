@@ -116,7 +116,10 @@ func TestMemCap(t *testing.T) {
 	if prevUsage < 25*1024*1024 {
 		t.Fatalf("Expected usage to be at least 25MB, was: %dB", prevUsage)
 	}
-	usage := e.memUsage(process.(*osProcess).cmd.Process.Pid)
+	usage, err := e.memUsage(process.(*osProcess).cmd.Process.Pid)
+	if err != nil {
+		t.Fatalf("Error finding memUsage, %v", err)
+	}
 	if usage > 75*1024*1024 {
 		t.Fatalf("Expected usage to be less than 75MB, was: %dB", prevUsage)
 	}
