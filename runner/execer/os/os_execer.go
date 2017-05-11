@@ -168,26 +168,26 @@ func (e *osExecer) monitorMem(p *osProcess) {
 func (e *osExecer) memUsage(pid int) (execer.Memory, error) {
 	str := `
 PID=%d
-PSLIST=$(ps -e -o pid= -o %s= -o rss= | tr '\n' ';' | sed 's,;$,,')
+PSLIST=$(ps -e -o pid= -o pgid= -o rss= | tr '\n' ';' | sed 's,;$,,')
 echo "
 
 processes=dict()
 memory=dict()
+id=None
 total=0
 for line in \"$PSLIST\".split(';'):
-  pid, id, mem = tuple(line.split())
+  pid, pgid, mem = tuple(line.split())
   if pid == \"$PID\":
-    # id is either a pgid or sid/sess
-    mem_id = id
-  processes.setdefault(id, []).append(pid)
+    id = pgid
+  processes.setdefault(pgid, []).append(pid)
   memory[pid] = mem
-for p in processes.setdefault(mem_id, []):
+for p in processes.setdefault(id, []):
   total += int(memory[p])
 print total
 
 " | python
 `
-	cmd := exec.Command("bash", "-c", fmt.Sprintf(str, pid, "pgid"))
+	cmd := exec.Command("bash", "-c", fmt.Sprintf(str, pid))
 	if usageKB, err := cmd.Output(); err != nil {
 		return 0, err
 	} else {
