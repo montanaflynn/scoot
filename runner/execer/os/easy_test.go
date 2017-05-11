@@ -101,15 +101,25 @@ func TestMemCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf(err.Error())
 	}
+	pid := process.(*osProcess).cmd.Process.Pid
 	// Sleep to give bounded execer time to kill process
 	time.Sleep(2 * time.Second)
 	var usage execer.Memory
-	if usage, err = e.memUsage(process.(*osProcess).cmd.Process.Pid); err != nil {
+	for i := 0; i < 100; i++ {
+		if usage, err = e.memUsage(pid); err != nil {
+			t.Fatalf(err.Error())
+		}
+		if usage == 0 {
+			process.Abort()
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if usage, err = e.memUsage(pid); err != nil {
 		t.Fatalf(err.Error())
 	}
 	if usage > 5*1024*1024 {
 		t.Fatalf("Expected usage to be less than 5MB, was: %dB", usage)
 	}
 
-	process.Abort()
 }
