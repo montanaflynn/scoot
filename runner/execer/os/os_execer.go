@@ -183,6 +183,7 @@ echo "
 processes=dict()
 memory=dict()
 total=0
+mem_id = None
 for line in \"$PSLIST\".split(';'):
   pid, id, mem = tuple(line.split())
   if pid == \"$PID\":
@@ -190,9 +191,12 @@ for line in \"$PSLIST\".split(';'):
     mem_id = id
   processes.setdefault(id, []).append(pid)
   memory[pid] = mem
-for p in processes.setdefault(mem_id, []):
-  total += int(memory[p])
-print total
+if mem_id is None:
+  print 0
+else:
+  for p in processes.setdefault(mem_id, []):
+    total += int(memory[p])
+  print total
 
 " | python
 `
