@@ -5,10 +5,11 @@ package endpoints
 import (
 	"bytes"
 	"fmt"
-	log "github.com/Sirupsen/logrus"
 	"io"
 	"net/http"
 	"time"
+
+	log "github.com/Sirupsen/logrus"
 
 	"github.com/scootdev/scoot/common/stats"
 )
@@ -41,7 +42,7 @@ func (s *TwitterServer) Serve() error {
 	for path, handler := range s.Handlers {
 		mux.Handle(path, handler)
 	}
-	log.Info("Serving http & stats on", s.Addr)
+	log.Info("Serving http & stats on ", s.Addr)
 	server := &http.Server{
 		Addr:    s.Addr,
 		Handler: mux,

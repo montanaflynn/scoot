@@ -112,6 +112,6 @@ func main() {
 		},
 	)
 
-	log.Info("Serving thrift on", *thriftAddr) //It's hard to access the thriftAddr value downstream, print it here.
+	log.Info("Serving thrift on ", *thriftAddr) //It's hard to access the thriftAddr value downstream, print it here.
 	server.RunServer(bag, schema, configText)
 }

@@ -84,7 +84,11 @@ func (s *localOutputCreator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	clientHtml :=
 		`<html>
 <script type="text/javascript">
-  var prevLength = 0
+  var maxReqLength = 1*1024*1024;
+  var contentLength = %d;
+  var nextPos = 0;
+  var skipped = 0;
+  var xhr = undefined;
   checkAtBottom = function() {
     //scrolling: http://stackoverflow.com/a/22394544
     var scrollTop = (document.documentElement && document.documentElement.scrollTop) || document.body.scrollTop;
@@ -97,26 +101,41 @@ func (s *localOutputCreator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
     window.scrollTo(scrollLeft, scrollHeight);
   }
   sendRequest = function() {
-    var xhr = new XMLHttpRequest();
+    if (xhr != undefined && skipped < 5 {
+      skipped++
+      return
+    }
+    else if (xhr != undefined) {
+      xhr.abort()
+    }
+    skipped = 0
+    xhr = new XMLHttpRequest();
     xhr.onreadystatechange = function () {
-      var DONE=4, OK=200;
-      if (xhr.readyState === DONE && xhr.status == OK) {
+      var DONE=4, OK_PARTIAL=206;
+      if (xhr.readyState === DONE && xhr.status != OK_PARTIAL) {
+        contentLength = Number(xhr.getResponseHeader("X-Total-Length"));
+        xhr = undefined
+      }
+      else if (xhr.readyState === DONE && xhr.status == OK_PARTIAL) {
         var wasAtBottom = checkAtBottom()
         var div = document.getElementById("output");
-        var txt = xhr.responseText.substring(prevLength);
-        var content = document.createTextNode(txt);
+        var content = document.createTextNode(xhr.responseText);
         div.appendChild(content);
         if (wasAtBottom)
           gotoBottom()
-        prevLength = xhr.responseText.length
+        nextPos += xhr.responseText.length
+        xhr = undefined
       }
     }
-    //TODO: request range to get delta.
     xhr.open("GET", location.href + (location.search=="" ? "?" : "&") + "content=true");
+    var endPos = contentLength - 1
+    if (endPos - nextPos > maxReqLength)
+      endPos = nextPos + maxReqLength-1
+    xhr.setRequestHeader('Range', 'bytes=' + nextPos + '-' + endPos);
     xhr.send();
   };
   sendRequest()
-  setInterval(sendRequest, 5000)
+  setInterval(sendRequest, 2500)
 </script>
 <body><pre><div id="output"></div></pre></body>
 </html>
@@ -136,9 +155,10 @@ func (s *localOutputCreator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		if r.URL.Query().Get("content") == "true" {
+			w.Header().Set("X-Total-Length", fmt.Sprintf("%d", info.Size()))
 			http.ServeContent(w, r, "", info.ModTime(), resource)
 		} else {
-			fmt.Fprintf(w, clientHtml)
+			fmt.Fprintf(w, fmt.Sprintf(clientHtml, info.Size()))
 		}
 	}
 }
