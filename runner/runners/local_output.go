@@ -101,7 +101,7 @@ func (s *localOutputCreator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
     window.scrollTo(scrollLeft, scrollHeight);
   }
   sendRequest = function() {
-    if (xhr != undefined && skipped < 5 {
+    if (xhr != undefined && skipped < 5) {
       skipped++
       return
     }
@@ -117,6 +117,7 @@ func (s *localOutputCreator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
         xhr = undefined
       }
       else if (xhr.readyState === DONE && xhr.status == OK_PARTIAL) {
+        contentLength = Number(xhr.getResponseHeader("X-Total-Length"));
         var wasAtBottom = checkAtBottom()
         var div = document.getElementById("output");
         var content = document.createTextNode(xhr.responseText);
