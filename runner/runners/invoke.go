@@ -19,6 +19,8 @@ import (
 )
 
 // invoke.go: Invoker runs a Scoot command.
+const stdoutName = "STDOUT"
+const stderrName = "STDERR"
 
 // NewInvoker creates an Invoker that will use the supplied helpers
 func NewInvoker(exec execer.Execer, filer snapshot.Filer, output runner.OutputCreator, tmp *temp.TempDir, stat stats.StatsReceiver) *Invoker {
@@ -68,6 +70,21 @@ func (inv *Invoker) run(cmd *runner.Command, id runner.RunID, abortCh chan struc
 	}()
 	start := time.Now()
 
+	stdout, err := inv.output.Create(fmt.Sprintf("%s-stdout", id))
+	if err != nil {
+		return runner.ErrorStatus(id, fmt.Errorf("could not create stdout: %v", err), runner.LogTags{JobID: cmd.JobID, TaskID: cmd.TaskID})
+	}
+	defer stdout.Close()
+
+	stderr, err := inv.output.Create(fmt.Sprintf("%s-stderr", id))
+	if err != nil {
+		return runner.ErrorStatus(id, fmt.Errorf("could not create stderr: %v", err), runner.LogTags{JobID: cmd.JobID, TaskID: cmd.TaskID})
+	}
+	defer stderr.Close()
+	m := make(map[string]runner.Output)
+	m[stdoutName] = stdout
+	m[stderrName] = stderr
+
 	var co snapshot.Checkout
 	checkoutCh := make(chan error)
 
@@ -110,6 +127,10 @@ func (inv *Invoker) run(cmd *runner.Command, id runner.RunID, abortCh chan struc
 			// If there was no error then we need to release this checkout.
 			co.Release()
 		}()
+
+		if err = inv.stdStreams(nil, m); err != nil {
+			log.Error(err)
+		}
 		return runner.AbortStatus(id, runner.LogTags{JobID: cmd.JobID, TaskID: cmd.TaskID})
 	case err := <-checkoutCh:
 		// stop the timer
@@ -119,24 +140,15 @@ func (inv *Invoker) run(cmd *runner.Command, id runner.RunID, abortCh chan struc
 			downloadTimer.Stop()
 		}
 		if err != nil {
+			if err2 := inv.stdStreams(nil, m); err2 != nil {
+				log.Error(err2)
+			}
 			return runner.ErrorStatus(id, err, runner.LogTags{JobID: cmd.JobID, TaskID: cmd.TaskID})
 		}
 		// Checkout is ok, continue with run and when finished release checkout.
 		defer co.Release()
 	}
 	log.Infof("checkout done. id: %v, checkout: %v", id, co.Path())
-
-	stdout, err := inv.output.Create(fmt.Sprintf("%s-stdout", id))
-	if err != nil {
-		return runner.ErrorStatus(id, fmt.Errorf("could not create stdout: %v", err), runner.LogTags{JobID: cmd.JobID, TaskID: cmd.TaskID})
-	}
-	defer stdout.Close()
-
-	stderr, err := inv.output.Create(fmt.Sprintf("%s-stderr", id))
-	if err != nil {
-		return runner.ErrorStatus(id, fmt.Errorf("could not create stderr: %v", err), runner.LogTags{JobID: cmd.JobID, TaskID: cmd.TaskID})
-	}
-	defer stderr.Close()
 
 	marker := "###########################################\n###########################################\n"
 	format := "%s\n\nDate: %v\nSelf: %s\tCmd:\n%v\n\n%s\n\n\nSCOOT_CMD_LOG\n"
@@ -151,6 +163,9 @@ func (inv *Invoker) run(cmd *runner.Command, id runner.RunID, abortCh chan struc
 		Stderr: stderr,
 	})
 	if err != nil {
+		if err2 := inv.stdStreams(nil, m); err2 != nil {
+			log.Error(err2)
+		}
 		return runner.ErrorStatus(id, fmt.Errorf("could not exec: %v", err), runner.LogTags{JobID: cmd.JobID, TaskID: cmd.TaskID})
 	}
 
@@ -174,11 +189,17 @@ func (inv *Invoker) run(cmd *runner.Command, id runner.RunID, abortCh chan struc
 		stdout.Write([]byte(fmt.Sprintf("\n\n%s\n\nFAILED\n\nTask aborted: %v", marker, cmd.String())))
 		stderr.Write([]byte(fmt.Sprintf("\n\n%s\n\nFAILED\n\nTask aborted: %v", marker, cmd.String())))
 		p.Abort()
+		if err := inv.stdStreams(nil, m); err != nil {
+			log.Error(err)
+		}
 		return runner.AbortStatus(id, runner.LogTags{JobID: cmd.JobID, TaskID: cmd.TaskID})
 	case <-timeoutCh:
 		stdout.Write([]byte(fmt.Sprintf("\n\n%s\n\nFAILED\n\nTask exceeded timeout %v: %v", marker, cmd.Timeout, cmd.String())))
 		stderr.Write([]byte(fmt.Sprintf("\n\n%s\n\nFAILED\n\nTask exceeded timeout %v: %v", marker, cmd.Timeout, cmd.String())))
 		p.Abort()
+		if err := inv.stdStreams(nil, m); err != nil {
+			log.Error(err)
+		}
 		log.Infof("run timed out. %s", cmd.String())
 		return runner.TimeoutStatus(id, runner.LogTags{JobID: cmd.JobID, TaskID: cmd.TaskID})
 	case st = <-processCh:
@@ -190,6 +211,9 @@ func (inv *Invoker) run(cmd *runner.Command, id runner.RunID, abortCh chan struc
 	case execer.COMPLETE:
 		tmp, err := inv.tmp.TempDir("invoke")
 		if err != nil {
+			if err := inv.stdStreams(tmp, m); err != nil {
+				log.Error(err)
+			}
 			return runner.ErrorStatus(id, fmt.Errorf("error staging ingestion dir: %v", err), runner.LogTags{JobID: cmd.JobID, TaskID: cmd.TaskID})
 		}
 		uploadTimer := inv.stat.Latency(stats.WorkerUploadLatency_ms).Time()
@@ -198,25 +222,11 @@ func (inv *Invoker) run(cmd *runner.Command, id runner.RunID, abortCh chan struc
 			os.RemoveAll(tmp.Dir)
 			uploadTimer.Stop()
 		}()
-		outPath := stdout.AsFile()
-		errPath := stderr.AsFile()
-		stdoutName := "STDOUT"
-		stderrName := "STDERR"
-		if writer, err := os.Create(filepath.Join(tmp.Dir, stdoutName)); err != nil {
-			return runner.ErrorStatus(id, fmt.Errorf("error staging ingestion for stdout: %v", err), runner.LogTags{JobID: cmd.JobID, TaskID: cmd.TaskID})
-		} else if reader, err := os.Open(outPath); err != nil {
-			return runner.ErrorStatus(id, fmt.Errorf("error staging ingestion for stdout: %v", err), runner.LogTags{JobID: cmd.JobID, TaskID: cmd.TaskID})
-		} else if _, err := io.Copy(writer, reader); err != nil {
-			return runner.ErrorStatus(id, fmt.Errorf("error staging ingestion for stdout: %v", err), runner.LogTags{JobID: cmd.JobID, TaskID: cmd.TaskID})
-		}
-		if writer, err := os.Create(filepath.Join(tmp.Dir, stderrName)); err != nil {
-			return runner.ErrorStatus(id, fmt.Errorf("error staging ingestion for stderr: %v", err), runner.LogTags{JobID: cmd.JobID, TaskID: cmd.TaskID})
-		} else if reader, err := os.Open(errPath); err != nil {
-			return runner.ErrorStatus(id, fmt.Errorf("error staging ingestion for stderr: %v", err), runner.LogTags{JobID: cmd.JobID, TaskID: cmd.TaskID})
-		} else if _, err := io.Copy(writer, reader); err != nil {
-			return runner.ErrorStatus(id, fmt.Errorf("error staging ingestion for stderr: %v", err), runner.LogTags{JobID: cmd.JobID, TaskID: cmd.TaskID})
-		}
 
+		err = inv.stdStreams(tmp, m)
+		if err != nil {
+			return runner.ErrorStatus(id, err, runner.LogTags{JobID: cmd.JobID, TaskID: cmd.TaskID})
+		}
 		ingestCh := make(chan interface{})
 		go func() {
 			snapshotID, err := inv.filer.Ingest(tmp.Dir)
@@ -230,10 +240,16 @@ func (inv *Invoker) run(cmd *runner.Command, id runner.RunID, abortCh chan struc
 		var snapshotID string
 		select {
 		case <-abortCh:
+			if err := inv.stdStreams(tmp, m); err != nil {
+				log.Error(err)
+			}
 			return runner.AbortStatus(id, runner.LogTags{JobID: cmd.JobID, TaskID: cmd.TaskID})
 		case res := <-ingestCh:
 			switch res.(type) {
 			case error:
+				if err := inv.stdStreams(tmp, m); err != nil {
+					log.Error(err)
+				}
 				return runner.ErrorStatus(id, fmt.Errorf("error ingesting results: %v", res), runner.LogTags{JobID: cmd.JobID, TaskID: cmd.TaskID})
 			}
 			snapshotID = res.(string)
@@ -248,9 +264,44 @@ func (inv *Invoker) run(cmd *runner.Command, id runner.RunID, abortCh chan struc
 		}
 		return status
 	case execer.FAILED:
+		if err := inv.stdStreams(nil, m); err != nil {
+			log.Error(err)
+		}
 		// We treat failure here as a bad request since it's more likely a faulty cmd than something we did wrong.
 		return runner.BadRequestStatus(id, fmt.Errorf("error execing: %v", st.Error), runner.LogTags{JobID: cmd.JobID, TaskID: cmd.TaskID})
 	default:
+		if err := inv.stdStreams(nil, m); err != nil {
+			log.Error(err)
+		}
 		return runner.ErrorStatus(id, fmt.Errorf("unexpected exec state: %v", st.State), runner.LogTags{JobID: cmd.JobID, TaskID: cmd.TaskID})
 	}
+}
+
+func (inv *Invoker) stdStreams(tmp *temp.TempDir, m map[string]runner.Output) error {
+	if tmp == nil {
+		tmp2, err := inv.tmp.TempDir("failed_run")
+		if err != nil {
+			return err
+		}
+		tmp = tmp2
+	}
+	outPath := m[stdoutName].AsFile()
+	errPath := m[stderrName].AsFile()
+
+	if writer, err := os.Create(filepath.Join(tmp.Dir, stdoutName)); err != nil {
+		return fmt.Errorf("error staging ingestion for stdout: %v", err)
+	} else if reader, err := os.Open(outPath); err != nil {
+		return fmt.Errorf("error staging ingestion for stdout: %v", err)
+	} else if _, err := io.Copy(writer, reader); err != nil {
+		return fmt.Errorf("error staging ingestion for stdout: %v", err)
+	}
+	if writer, err := os.Create(filepath.Join(tmp.Dir, stderrName)); err != nil {
+		return fmt.Errorf("error staging ingestion for stderr: %v", err)
+	} else if reader, err := os.Open(errPath); err != nil {
+		return fmt.Errorf("error staging ingestion for stderr: %v", err)
+	} else if _, err := io.Copy(writer, reader); err != nil {
+		return fmt.Errorf("error staging ingestion for stderr: %v", err)
+	}
+
+	return nil
 }

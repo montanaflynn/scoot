@@ -117,6 +117,12 @@ func (e *osExecer) monitorMem(p *osProcess) {
 			// Aborting process, above memCap
 			if mem >= e.memCap {
 				msg := fmt.Sprintf("Cmd exceeded MemoryCap, aborting %d: %d > %d (%v)", pid, mem, e.memCap, p.cmd.Args)
+				if p.cmd.Stdout != nil {
+					p.cmd.Stdout.Write([]byte(msg))
+				}
+				if p.cmd.Stderr != nil {
+					p.cmd.Stderr.Write([]byte(msg))
+				}
 				log.WithFields(log.Fields{
 					"mem":    mem,
 					"memCap": e.memCap,
