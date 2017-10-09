@@ -107,6 +107,7 @@ func NewQueueRunner(
 			if err != nil {
 				stat.Counter(stats.WorkerDownloadInitFailure).Inc(1)
 				statusManager.UpdateService(runner.ServiceStatus{Initialized: false, Error: err})
+				os.Exit(1)
 			} else {
 				statusManager.UpdateService(runner.ServiceStatus{Initialized: true})
 				startUpdateTicker(filer.UpdateInterval(), controller.updateCh, controller.cancelTimerCh)
